@@ -11,14 +11,58 @@ const APPS_SCRIPT_URL = process.env.APPS_SCRIPT_URL; // URL Web App GAS /exec
 /* ====== KONFIG DOMAIN/PROXY/UA ====== */
 const DOMAINS_MAP = {
   id: "https://nyuhbalivillas.com/",
+  au: "https://nyuhbalivillas.com/",
+  sg: "https://nyuhbalivillas.com/",
+  uk: "https://nyuhbalivillas.com/",
+  br: "https://nyuhbalivillas.com/",
+  fl: "https://nyuhbalivillas.com/",
+  in: "https://nyuhbalivillas.com/",
+  de: "https://nyuhbalivillas.com/",
+  nl: "https://nyuhbalivillas.com/",
+  dk: "https://nyuhbalivillas.com/",
+  es: "https://nyuhbalivillas.com/",
+  us: "https://nyuhbalivillas.com/",
+  fr: "https://nyuhbalivillas.com/",
+  ca: "https://nyuhbalivillas.com/",
+  mx: "https://nyuhbalivillas.com/",
 };
 
 const PROXIES = {
-  id: process.env.BRD_PROXY_ID, // boleh kosong (tanpa proxy)
+  id: process.env.BRD_PROXY_ID, // Indonesia
+  au: process.env.BRD_PROXY_AU, // Australia
+  ae: process.env.BRD_PROXY_AE, // UAE
+  sg: process.env.BRD_PROXY_SG, // Singapore
+  uk: process.env.BRD_PROXY_UK, // United Kingdom
+  br: process.env.BRD_PROXY_BR, // Brazil
+  fl: process.env.BRD_PROXY_FL, // Finland
+  in: process.env.BRD_PROXY_IN, // India
+  de: process.env.BRD_PROXY_DE, // Germany
+  nl: process.env.BRD_PROXY_NL, // Netherlands
+  dk: process.env.BRD_PROXY_DK, // Denmark
+  es: process.env.BRD_PROXY_ES, // Spain
+  us: process.env.BRD_PROXY_US, // USA
+  fr: process.env.BRD_PROXY_FR, // France
+  ca: process.env.BRD_PROXY_CA, // Canada
+  mx: process.env.BRD_PROXY_MX, // Mexico
 };
 
 const USER_AGENTS = {
   id: "Nyuhbalivillas-CacheWarmer-ID/1.0",
+  au: "Nyuhbalivillas-CacheWarmer-AU/1.0",
+  ae: "Nyuhbalivillas-CacheWarmer-AE/1.0",
+  sg: "Nyuhbalivillas-CacheWarmer-SG/1.0",
+  uk: "Nyuhbalivillas-CacheWarmer-UK/1.0",
+  br: "Nyuhbalivillas-CacheWarmer-BR/1.0",
+  fl: "Nyuhbalivillas-CacheWarmer-FL/1.0",
+  in: "Nyuhbalivillas-CacheWarmer-IN/1.0",
+  de: "Nyuhbalivillas-CacheWarmer-DE/1.0",
+  nl: "Nyuhbalivillas-CacheWarmer-NL/1.0",
+  dk: "Nyuhbalivillas-CacheWarmer-DK/1.0",
+  es: "Nyuhbalivillas-CacheWarmer-ES/1.0",
+  us: "Nyuhbalivillas-CacheWarmer-US/1.0",
+  fr: "Nyuhbalivillas-CacheWarmer-FR/1.0",
+  ca: "Nyuhbalivillas-CacheWarmer-CA/1.0",
+  mx: "Nyuhbalivillas-CacheWarmer-MX/1.0",
 };
 
 /* ====== CLOUDFLARE (opsional) ====== */
@@ -165,8 +209,7 @@ async function fetchUrlsFromSitemap(sitemapUrl, country) {
     return urls.map((entry) => entry.loc).filter(Boolean);
   } catch (err) {
     console.warn(
-      `[${country}] ❌ Failed to fetch URLs from ${sitemapUrl}: ${
-        err?.message || err
+      `[${country}] ❌ Failed to fetch URLs from ${sitemapUrl}: ${err?.message || err
       }`
     );
     return [];
@@ -182,11 +225,18 @@ async function retryableGet(url, cfg, retries = 3) {
     } catch (err) {
       lastError = err;
       const code = err?.code || "";
-      const retryable =
+      const status = err?.response?.status;
+
+      // Retry jika network error ATAU server error (502, 503, 504)
+      const isNetworkError =
         axios.isAxiosError(err) &&
         ["ECONNABORTED", "ECONNRESET", "ETIMEDOUT"].includes(code);
-      if (!retryable) break;
-      await sleep(2000);
+      const isServerError = [502, 503, 504].includes(status);
+
+      if (!isNetworkError && !isServerError) break;
+
+      console.log(`  ⟳ Retry ${i + 1}/${retries} for ${url} (${status || code})`);
+      await sleep(3000); // tunggu 3 detik sebelum retry
     }
   }
   throw lastError;
@@ -281,31 +331,34 @@ async function warmUrls(urls, country, logger, batchSize = 1, delay = 2000) {
   }
 }
 
-/* ====== MAIN (batch per-run, satu tab) ====== */
+/* ====== MAIN (SEQUENTIAL per-country, satu tab) ====== */
 (async () => {
   console.log(`[CacheWarmer] Started: ${new Date().toISOString()}`);
   const logger = new AppsScriptLogger();
 
   try {
-    await Promise.all(
-      Object.entries(DOMAINS_MAP).map(async ([country, domain]) => {
-        const sitemapList = await fetchIndexSitemaps(domain, country);
-        const urlArrays = await Promise.all(
-          sitemapList.map((sitemapUrl) =>
-            fetchUrlsFromSitemap(sitemapUrl, country)
-          )
-        );
-        const urls = urlArrays.flat().filter(Boolean);
+    // Proses BERURUTAN per-negara (bukan paralel)
+    for (const [country, domain] of Object.entries(DOMAINS_MAP)) {
+      console.log(`\n========== [${country.toUpperCase()}] MULAI ==========`);
 
-        console.log(`[${country}] Found ${urls.length} URLs`);
-        logger.log({
-          country,
-          message: `Found ${urls.length} URLs for ${country}`,
-        });
+      const sitemapList = await fetchIndexSitemaps(domain, country);
+      const urlArrays = await Promise.all(
+        sitemapList.map((sitemapUrl) =>
+          fetchUrlsFromSitemap(sitemapUrl, country)
+        )
+      );
+      const urls = urlArrays.flat().filter(Boolean);
 
-        await warmUrls(urls, country, logger);
-      })
-    );
+      console.log(`[${country}] Found ${urls.length} URLs`);
+      logger.log({
+        country,
+        message: `Found ${urls.length} URLs for ${country}`,
+      });
+
+      await warmUrls(urls, country, logger);
+
+      console.log(`========== [${country.toUpperCase()}] SELESAI ==========\n`);
+    }
   } finally {
     // Kirim SEKALI di akhir → semua baris tersimpan dalam SATU tab (sheetName per-run)
     logger.setFinished();
