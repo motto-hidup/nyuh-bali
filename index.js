@@ -12,57 +12,16 @@ const APPS_SCRIPT_URL = process.env.APPS_SCRIPT_URL; // URL Web App GAS /exec
 const DOMAINS_MAP = {
   id: "https://nyuhbalivillas.com/",
   au: "https://nyuhbalivillas.com/",
-  sg: "https://nyuhbalivillas.com/",
-  uk: "https://nyuhbalivillas.com/",
-  br: "https://nyuhbalivillas.com/",
-  fl: "https://nyuhbalivillas.com/",
-  in: "https://nyuhbalivillas.com/",
-  de: "https://nyuhbalivillas.com/",
-  nl: "https://nyuhbalivillas.com/",
-  dk: "https://nyuhbalivillas.com/",
-  es: "https://nyuhbalivillas.com/",
-  us: "https://nyuhbalivillas.com/",
-  fr: "https://nyuhbalivillas.com/",
-  ca: "https://nyuhbalivillas.com/",
-  mx: "https://nyuhbalivillas.com/",
 };
 
 const PROXIES = {
   id: process.env.BRD_PROXY_ID, // Indonesia
   au: process.env.BRD_PROXY_AU, // Australia
-  ae: process.env.BRD_PROXY_AE, // UAE
-  sg: process.env.BRD_PROXY_SG, // Singapore
-  uk: process.env.BRD_PROXY_UK, // United Kingdom
-  br: process.env.BRD_PROXY_BR, // Brazil
-  fl: process.env.BRD_PROXY_FL, // Finland
-  in: process.env.BRD_PROXY_IN, // India
-  de: process.env.BRD_PROXY_DE, // Germany
-  nl: process.env.BRD_PROXY_NL, // Netherlands
-  dk: process.env.BRD_PROXY_DK, // Denmark
-  es: process.env.BRD_PROXY_ES, // Spain
-  us: process.env.BRD_PROXY_US, // USA
-  fr: process.env.BRD_PROXY_FR, // France
-  ca: process.env.BRD_PROXY_CA, // Canada
-  mx: process.env.BRD_PROXY_MX, // Mexico
 };
 
 const USER_AGENTS = {
   id: "Nyuhbalivillas-CacheWarmer-ID/1.0",
   au: "Nyuhbalivillas-CacheWarmer-AU/1.0",
-  ae: "Nyuhbalivillas-CacheWarmer-AE/1.0",
-  sg: "Nyuhbalivillas-CacheWarmer-SG/1.0",
-  uk: "Nyuhbalivillas-CacheWarmer-UK/1.0",
-  br: "Nyuhbalivillas-CacheWarmer-BR/1.0",
-  fl: "Nyuhbalivillas-CacheWarmer-FL/1.0",
-  in: "Nyuhbalivillas-CacheWarmer-IN/1.0",
-  de: "Nyuhbalivillas-CacheWarmer-DE/1.0",
-  nl: "Nyuhbalivillas-CacheWarmer-NL/1.0",
-  dk: "Nyuhbalivillas-CacheWarmer-DK/1.0",
-  es: "Nyuhbalivillas-CacheWarmer-ES/1.0",
-  us: "Nyuhbalivillas-CacheWarmer-US/1.0",
-  fr: "Nyuhbalivillas-CacheWarmer-FR/1.0",
-  ca: "Nyuhbalivillas-CacheWarmer-CA/1.0",
-  mx: "Nyuhbalivillas-CacheWarmer-MX/1.0",
 };
 
 /* ====== CLOUDFLARE (opsional) ====== */
@@ -100,7 +59,7 @@ class AppsScriptLogger {
     url = "",
     status = "",
     cfCache = "",
-    lsCache = "",
+    originCache = "",
     cfRay = "",
     responseMs = "",
     error = 0,
@@ -114,7 +73,7 @@ class AppsScriptLogger {
       url, // url
       status, // status code
       cfCache, // cf_cache
-      lsCache, // vercel_cache (dipakai utk LiteSpeed)
+      originCache, // vercel_cache
       cfRay, // cf_ray
       typeof responseMs === "number" ? responseMs : "", // response_ms
       error ? 1 : 0, // error (0/1)
@@ -138,7 +97,7 @@ class AppsScriptLogger {
       const res = await axios.post(
         APPS_SCRIPT_URL,
         { sheetName: this.sheetName, rows: this.rows },
-        { timeout: 60000, headers: { "Content-Type": "application/json" } }
+        { timeout: 120000, headers: { "Content-Type": "application/json" } }
       );
       console.log("Apps Script response:", res.status, res.data);
       if (!res.data?.ok) console.warn("Apps Script replied error:", res.data);
@@ -165,6 +124,16 @@ function buildAxiosCfg(country, extra = {}) {
   return cfg;
 }
 
+function buildRevalidationAxiosCfg(country) {
+  const cfg = buildAxiosCfg(country, { timeout: 15000 });
+  cfg.headers = {
+    ...cfg.headers,
+    "Cache-Control": "no-cache",
+    Pragma: "no-cache",
+  };
+  return cfg;
+}
+
 /* ====== SITEMAP ====== */
 async function fetchWithProxy(url, country, timeout = 15000) {
   const cfg = buildAxiosCfg(country, { timeout });
@@ -174,25 +143,40 @@ async function fetchWithProxy(url, country, timeout = 15000) {
 
 async function fetchIndexSitemaps(domain, country) {
   try {
-    // WordPress Yoast umumnya: /sitemap_index.xml
-    const xml = await fetchWithProxy(
-      `${domain}/sitemap_index.xml`,
-      country,
-      15000
-    );
+    const xml = await fetchWithProxy(new URL("/sitemap.xml", domain).href, country);
     const result = await parseStringPromise(xml, {
       explicitArray: false,
       ignoreAttrs: true,
     });
     const sitemapList = result?.sitemapindex?.sitemap;
-    if (!sitemapList) return [];
-    const sitemaps = Array.isArray(sitemapList) ? sitemapList : [sitemapList];
-    return sitemaps.map((entry) => entry.loc).filter(Boolean);
+    if (sitemapList) {
+      return {
+        sitemaps: (Array.isArray(sitemapList) ? sitemapList : [sitemapList])
+          .map((e) => e.loc)
+          .filter(Boolean),
+        urls: [],
+      };
+    }
+
+    // Some sites redirect /sitemap.xml to a sitemap containing URLs
+    // directly instead of a sitemap index containing child sitemap files.
+    const urlList = result?.urlset?.url;
+    if (urlList) {
+      return {
+        sitemaps: [],
+        urls: (Array.isArray(urlList) ? urlList : [urlList])
+          .map((e) => e.loc)
+          .filter(Boolean),
+      };
+    }
+
+    console.warn(`[${country}] Sitemap response has no <sitemapindex> or <urlset>`);
+    return { sitemaps: [], urls: [] };
   } catch (err) {
     console.warn(
-      `[${country}] ❌ Failed to fetch sitemap index: ${err?.message || err}`
+      `[${country}] Failed to fetch sitemap index: ${err?.message || err}`
     );
-    return [];
+    return { sitemaps: [], urls: [] };
   }
 }
 
@@ -249,6 +233,8 @@ async function purgeCloudflareCache(url) {
       `https://api.cloudflare.com/client/v4/zones/${CLOUDFLARE_ZONE_ID}/purge_cache`,
       { files: [url] },
       {
+        timeout: 15000,
+        proxy: false,
         headers: {
           Authorization: `Bearer ${CLOUDFLARE_API_TOKEN}`,
           "Content-Type": "application/json",
@@ -276,37 +262,77 @@ async function warmUrls(urls, country, logger, batchSize = 1, delay = 2000) {
       batch.map(async (url) => {
         const t0 = Date.now();
         try {
-          const res = await retryableGet(
+          let res = await retryableGet(
             url,
             buildAxiosCfg(country, { timeout: 15000 }),
             3
           );
+          let originCache = res.headers["x-vercel-cache"] || "N/A";
+
+          if (String(originCache).toLowerCase() === "stale") {
+            console.log(
+              `[${country}] Vercel cache is STALE; purging Cloudflare and requesting synchronous revalidation: ${url}`
+            );
+            await purgeCloudflareCache(url);
+
+            try {
+              res = await retryableGet(
+                url,
+                buildRevalidationAxiosCfg(country),
+                1
+              );
+              originCache = res.headers["x-vercel-cache"] || "N/A";
+
+              if (String(originCache).toLowerCase() === "stale") {
+                console.warn(
+                  `[${country}] Vercel still returned STALE after synchronous revalidation: ${url}`
+                );
+              }
+            } catch (revalidationError) {
+              console.warn(
+                `[${country}] Vercel synchronous revalidation failed for ${url}: ${revalidationError?.message || revalidationError}`
+              );
+            }
+          }
+
           const dt = Date.now() - t0;
 
           const cfCache = res.headers["cf-cache-status"] || "N/A";
-          const lsCache = res.headers["x-litespeed-cache"] || "N/A";
           const cfRay = res.headers["cf-ray"] || "N/A";
           const cfEdge = cfRay.includes("-") ? cfRay.split("-")[1] : "N/A";
 
+          if (
+            String(originCache).toLowerCase() === "stale" &&
+            String(cfCache).toLowerCase() === "hit"
+          ) {
+            console.warn(
+              `[${country}] Cloudflare still served a cached STALE response; Vercel revalidation was not confirmed for ${url}`
+            );
+          }
+
           console.log(
-            `[${country}] ${res.status} cf=${cfCache} ls=${lsCache} edge=${cfEdge} - ${url}`
+            `[${country}] ${res.status} cf=${cfCache} vercel=${originCache} edge=${cfEdge} - ${url}`
           );
 
-          // Kumpulkan log (TIDAK dikirim sekarang; dikirim sekali di akhir run)
           logger.log({
             country: cfEdge,
             url,
             status: res.status,
             cfCache,
-            lsCache, // disimpan di kolom 'vercel_cache' (header lama)
+            originCache,
             cfRay,
             responseMs: dt,
             error: 0,
             message: "",
           });
 
-          // Aturan purge: kalau LiteSpeed bukan HIT → purge CF
-          if (String(lsCache).toLowerCase() !== "hit") {
+          const originCacheStatus = String(originCache).toLowerCase();
+          if (originCacheStatus === "stale") {
+            console.log(
+              `[${country}] Vercel is still STALE; purging Cloudflare again so this stale response is not left cached: ${url}`
+            );
+            await purgeCloudflareCache(url);
+          } else if (originCacheStatus !== "hit") {
             await purgeCloudflareCache(url);
           }
         } catch (err) {
@@ -326,7 +352,6 @@ async function warmUrls(urls, country, logger, batchSize = 1, delay = 2000) {
       })
     );
 
-    // TIDAK flush di sini → supaya semua baris terkirim SEKALI di akhir ke satu tab
     await sleep(delay);
   }
 }
@@ -341,13 +366,14 @@ async function warmUrls(urls, country, logger, batchSize = 1, delay = 2000) {
     for (const [country, domain] of Object.entries(DOMAINS_MAP)) {
       console.log(`\n========== [${country.toUpperCase()}] MULAI ==========`);
 
-      const sitemapList = await fetchIndexSitemaps(domain, country);
+      const { sitemaps: sitemapList, urls: directUrls } =
+        await fetchIndexSitemaps(domain, country);
       const urlArrays = await Promise.all(
         sitemapList.map((sitemapUrl) =>
           fetchUrlsFromSitemap(sitemapUrl, country)
         )
       );
-      const urls = urlArrays.flat().filter(Boolean);
+      const urls = [...new Set([...directUrls, ...urlArrays.flat()].filter(Boolean))];
 
       console.log(`[${country}] Found ${urls.length} URLs`);
       logger.log({
